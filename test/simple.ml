@@ -12,7 +12,7 @@ let () =
   assert (z.a == z);
   assert (z.b = B);
   assert (z.c = C);
-  Offheap.free y
+  Offheap.delete y
 
 let () =
   (* Tests a sequence of bytes. *)
@@ -24,7 +24,7 @@ let () =
   let y = Offheap.copy x in
   let z = Offheap.get y in
   assert (z = x);
-  Offheap.free y
+  Offheap.delete y
 
 let () =
   (* Tests a closure. *)
@@ -34,7 +34,7 @@ let () =
   let z = Offheap.get y in
   let n = match z with None -> 1 | Some f -> f () in
   assert (n = 3);
-  Offheap.free y
+  Offheap.delete y
 
 let () =
   (* Should fail if object is an integer. *)
