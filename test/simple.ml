@@ -37,16 +37,27 @@ let () =
   Offheap.delete y
 
 let () =
-  (* Should fail if object is an integer. *)
-  try
-    ignore (Offheap.copy 4);
-    failwith "failed"
-  with Invalid_argument _ -> ()
-
-let () =
   (* Should fail if object is abstract. *)
   try
     let rec x = { a = x; b = B; c = C } in
     ignore (Offheap.copy (Offheap.copy x));
     failwith "failed"
   with Invalid_argument _ -> ()
+
+let () =
+  (* Should handle primitives. *)
+  let x = 1 in
+  let y = Offheap.copy x in
+  let z = Offheap.get y in
+  assert (z = x);
+  Offheap.delete y
+
+let () =
+  (* Should handle static data. *)
+  let x = "123" in
+  let y = Offheap.copy x in
+  let z = Offheap.get y in
+  assert (z = x);
+  Offheap.delete y
+
+

@@ -158,6 +158,7 @@ static inline int can_copy(tag_t tag)
   return tag != Custom_tag && tag != Abstract_tag;
 }
 
+
 /**
  * Copies an object into a buffer, returning a pointer to the buffer.
  */
@@ -165,6 +166,11 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
 {
   static struct queue q;
   queue_init(&q);
+
+  // Some objects cannot be copied - bail out.
+  if (!can_copy(Tag_val(v))) {
+    return NULL;
+  }
 
   // Adjust pointer for infix objects.
   if (Tag_hd(Hd_val(v)) == Infix_tag) {
@@ -209,7 +215,7 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
         const tag_t th = Tag_hd(fh);
 
         // Off-heap objects cannot point back to the heap and we cannot copy
-        // custom objects as we do
+        // custom objects as we do not know anything about their internals.
         if (!can_copy(th)) {
           size = -2;
           goto error;
@@ -291,16 +297,17 @@ error:
   }
   queue_free(&q);
 
-  return (void *)buffer;
+  return size < 0 ? NULL : (void *)buffer;
 }
 
 CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
 {
   CAMLparam2(allocator, obj);
+  CAMLlocal1(proxy);
 
-  // The object must be a block on the OCaml heap.
-  if (!Is_block(obj) || !Is_in_heap_or_young(obj) || !can_copy(Tag_val(obj))) {
-    caml_invalid_argument("object cannot be moved off-heap");
+  // If the object is not on the OCaml heap, return it unchanged.
+  if (!Is_block(obj) || !Is_in_heap_or_young(obj)) {
+    return obj;
   }
 
   // Fetch the allocator function.
@@ -313,7 +320,7 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
   }
 
   // Create a proxy pointing to the object, storing the allocator as well.
-  value proxy = caml_alloc(2, Abstract_tag);
+  proxy = caml_alloc_small(2, Abstract_tag);
   Field(proxy, 0) = (value)copy;
   Field(proxy, 1) = allocator;
   CAMLreturn(proxy);
@@ -322,9 +329,15 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
 CAMLprim value offheap_get(value obj)
 {
   CAMLparam1(obj);
+  CAMLlocal1(ptr);
+
+  // If the object is not on the OCaml heap, return it unchanged.
+  if (!Is_block(obj) || !Is_in_heap_or_young(obj)) {
+    return obj;
+  }
 
   // Fetch the pointer, which should not have been deleted.
-  value ptr = *Op_val(obj);
+  ptr = *Op_val(obj);
   if (Is_long(ptr)) {
     caml_invalid_argument("deleted");
   }
@@ -336,10 +349,15 @@ CAMLprim value offheap_get(value obj)
 CAMLprim value offheap_delete(value obj)
 {
   CAMLparam1(obj);
-  CAMLlocal1(allocator);
+  CAMLlocal2(allocator, ptr);
+
+  // If object is not on the OCaml heap, do nothing.
+  if (!Is_block(obj) || !Is_in_heap_or_young(obj)) {
+    CAMLreturn(Val_unit);
+  }
 
   // Fetch the pointer, which should not have been deleted.
-  value ptr = *Op_val(obj);
+  ptr = *Op_val(obj);
   if (Is_long(ptr)) {
     caml_invalid_argument("deleted");
   }
@@ -358,10 +376,11 @@ CAMLprim value offheap_delete(value obj)
 CAMLprim value offheap_get_alloc(value unit)
 {
   CAMLparam1(unit);
+  CAMLlocal1(block);
 
   // Allocate a block with two fields to hold the default allocator.
   // Custom allocators can store additional data by using a larger object.
-  value block = caml_alloc(2, Abstract_tag);
+  block = caml_alloc_small(2, Abstract_tag);
   Field(block, 0) = (value)default_alloc;
   Field(block, 1) = (value)default_free;
   CAMLreturn(block);
