@@ -357,6 +357,8 @@ CAMLprim value offheap_delete(value obj)
 
 CAMLprim value offheap_get_alloc(value unit)
 {
+  CAMLparam1(unit);
+
   // Allocate a block with two fields to hold the default allocator.
   // Custom allocators can store additional data by using a larger object.
   value block = caml_alloc(2, Abstract_tag);
