@@ -11,6 +11,8 @@
 #include <caml/address_class.h>
 #include <caml/gc.h>
 
+#include "offheap.h"
+
 
 
 #define ENTRIES_PER_QUEUE_CHUNK 4096
@@ -54,12 +56,6 @@ typedef struct queue {
   /// Index into the written chunk.
   int write_pos;
 } queue_t;
-
-/**
- * Pointers to functions allocating / deallocting memory.
- */
-typedef void *(*alloc_t) (value allocator, size_t size);
-typedef void (*free_t) (value allocator, void *ptr);
 
 
 /**
@@ -165,10 +161,15 @@ static inline int can_copy(tag_t tag)
 /**
  * Copies an object into a buffer, returning a pointer to the buffer.
  */
-static void *copy_object(value v, value allocator, alloc_t alloc_fn)
+void *offheap_copy(value v, void *data, alloc_t alloc_fn)
 {
   static struct queue q;
   queue_init(&q);
+
+  // Adjust pointer for infix objects.
+  if (Tag_hd(Hd_val(v)) == Infix_tag) {
+    v -= Infix_offset_hd(Hd_val(v));
+  }
 
   // Push the first item with offset 0 and marks its header.
   queue_push(&q, v, Hd_val(v));
@@ -231,7 +232,7 @@ static void *copy_object(value v, value allocator, alloc_t alloc_fn)
 
   // Now that the size is known, allocate a contiguous off-heap
   // buffer large enough to hold the entire object.
-  const uintptr_t buffer = (uintptr_t)alloc_fn(allocator, size);
+  const uintptr_t buffer = (uintptr_t)alloc_fn(data, size);
 
   // Second pass: Adjust all pointers.
   if (buffer) {
@@ -290,13 +291,6 @@ error:
   }
   queue_free(&q);
 
-  if (size == -2) {
-    caml_invalid_argument("pointed object cannot be moved off-heap");
-  }
-  if (size == -2 || buffer == 0) {
-    caml_raise_out_of_memory();
-  }
-
   return (void *)buffer;
 }
 
@@ -305,22 +299,22 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
   CAMLparam2(allocator, obj);
 
   // The object must be a block on the OCaml heap.
-  if (Is_long(obj) || !Is_in_heap_or_young(obj) || !can_copy(Tag_val(obj))) {
+  if (!Is_block(obj) || !Is_in_heap_or_young(obj) || !can_copy(Tag_val(obj))) {
     caml_invalid_argument("object cannot be moved off-heap");
   }
 
-  // Fetch the allocator/deallocator functions.
+  // Fetch the allocator function.
   alloc_t alloc_fn = (alloc_t)Field(allocator, 0);
 
-  // Adjust poitner for infix objects.
-  if (Tag_hd(Hd_val(obj)) == Infix_tag) {
-    obj -= Infix_offset_hd(Hd_val(obj));
+  // Copy the object.
+  void *copy = offheap_copy(obj, (void *)allocator, alloc_fn);
+  if (copy == NULL) {
+    caml_invalid_argument("object could not be copied off-heap");
   }
 
-  // Copy the object and create a proxy pointing to it, storing the
-  // function to free the object in the block as well.
+  // Create a proxy pointing to the object, storing the allocator as well.
   value proxy = caml_alloc(2, Abstract_tag);
-  Field(proxy, 0) = (value)copy_object(obj, allocator, alloc_fn);
+  Field(proxy, 0) = (value)copy;
   Field(proxy, 1) = allocator;
   CAMLreturn(proxy);
 }
@@ -353,7 +347,7 @@ CAMLprim value offheap_delete(value obj)
   // Free the pointer, which should be a valid malloc'd pointer.
   allocator = Field(obj, 1);
   free_t free_fn = (free_t)Field(allocator, 1);
-  free_fn(allocator, (void*)ptr);
+  free_fn((void *)allocator, (void*)ptr);
 
   // Clear the field.
   Field(obj, 0) = Val_long(0);
@@ -368,5 +362,5 @@ CAMLprim value offheap_get_alloc(value unit)
   value block = caml_alloc(2, Abstract_tag);
   Field(block, 0) = (value)default_alloc;
   Field(block, 1) = (value)default_free;
-  return block;
+  CAMLreturn(block);
 }
