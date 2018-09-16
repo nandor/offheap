@@ -198,7 +198,7 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
     // encoded in the header when checking pointers to this object, we keep the
     // header correctly formatted, with colour and tag intact.
     const mlsize_t bytes = Bhsize_hd(hd);
-    Hd_val(node) = Make_header(0, tag, Caml_blue);
+    Hd_val(node) = Make_header(size, tag, Caml_blue);
     size += bytes;
 
     if (tag < No_scan_tag) {
