@@ -4,6 +4,8 @@ type t0 = A | B | C | D | E
 
 type t1 = { a: t1; b : t0; c: t0 }
 
+type t2 = { x: t1; y: t1 }
+
 let () =
   (* Tests a cycle. *)
   let rec x = { a = x; b = B; c = C } in
@@ -24,6 +26,19 @@ let () =
   let y = Offheap.copy x in
   let z = Offheap.get y in
   assert (z = x);
+  Offheap.delete y
+
+let () =
+  (* Tests a complex object. *)
+  let rec a = { a = a; b = B; c = C } in
+  let rec b = { a = b; b = C; c = B } in
+  let x = { x = a; y = b } in
+  let y = Offheap.copy x in
+  let z = Offheap.get y in
+  assert (z.x.a == z.x);
+  assert (z.y.a == z.y);
+  assert (z.x.b = B && z.x.c = C);
+  assert (z.y.b = C && z.y.c = B);
   Offheap.delete y
 
 let () =
