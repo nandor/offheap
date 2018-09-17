@@ -1,15 +1,15 @@
 // Copies objects out of the OCaml heap where they are not managed by the GC
 
 #include <string.h>
-#include <assert.h>
 
-#include <caml/config.h>
-#include <caml/memory.h>
-#include <caml/alloc.h>
-#include <caml/mlvalues.h>
-#include <caml/fail.h>
 #include <caml/address_class.h>
+#include <caml/alloc.h>
+#include <caml/config.h>
+#include <caml/custom.h>
+#include <caml/fail.h>
 #include <caml/gc.h>
+#include <caml/memory.h>
+#include <caml/mlvalues.h>
 
 #include "offheap.h"
 
@@ -150,12 +150,42 @@ void queue_free(queue_t *q)
   }
 }
 
+
 /**
  * Checks if the object can be copied.
  */
-static inline int can_copy(tag_t tag)
+static inline int can_copy(value val)
 {
-  return tag != Custom_tag && tag != Abstract_tag;
+  switch (Tag_val(val)) {
+    case Abstract_tag: {
+      // Abstract objects definitely cannot be copied.
+      return 0;
+    }
+    case Custom_tag: {
+      // Some custom objects present in the runtime can be simply copied.
+      struct custom_operations *ops = Custom_ops_val(val);
+
+      extern struct custom_operations caml_int32_ops;
+      if (ops == &caml_int32_ops) {
+        return 1;
+      }
+
+      extern struct custom_operations caml_int64_ops;
+      if (ops == &caml_int64_ops) {
+        return 1;
+      }
+
+      extern struct custom_operations caml_nativeint_ops;
+      if (ops == &caml_nativeint_ops) {
+        return 1;
+      }
+      return 0;
+    }
+    default: {
+      // All other objects can be copied.
+      return 1;
+    }
+  }
 }
 
 
@@ -167,14 +197,14 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
   static struct queue q;
   queue_init(&q);
 
-  // Some objects cannot be copied - bail out.
-  if (!can_copy(Tag_val(v))) {
-    return NULL;
+  // Adjust the pointer for infix values.
+  if (Tag_val(v) == Infix_tag) {
+    v -= Infix_offset_hd(Hd_val(v));
   }
 
-  // Adjust pointer for infix objects.
-  if (Tag_hd(Hd_val(v)) == Infix_tag) {
-    v -= Infix_offset_hd(Hd_val(v));
+  // Ensure the value can be copied.
+  if (!can_copy(v)) {
+    return NULL;
   }
 
   // Push the first item with offset 0 and marks its header.
@@ -216,7 +246,7 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
 
         // Off-heap objects cannot point back to the heap and we cannot copy
         // custom objects as we do not know anything about their internals.
-        if (!can_copy(th)) {
+        if (!can_copy(field)) {
           size = -2;
           goto error;
         }
@@ -259,6 +289,7 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
 
       // Set up the new object.
       if (tag < No_scan_tag) {
+        // Regular object - copy field by field.
         for (int i = 0; i < sz; ++i) {
           value field = Field(node, i);
 
@@ -272,7 +303,7 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
 
             // At this point, all pointed-to objects should be coloured.
             const header_t fd = Hd_val(field);
-            assert(Is_blue_hd(fd));
+            CAMLassert(Is_blue_hd(fd));
 
             // Size field of header stores the offset into the new buffer.
             const uintptr_t addr = buffer + Wosize_hd(fd);
@@ -285,7 +316,7 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
       }
     }
 
-    assert(ptr == buffer + size);
+    CAMLassert(ptr == buffer + size);
   }
 
 error:
@@ -385,3 +416,4 @@ CAMLprim value offheap_get_alloc(value unit)
   Field(block, 1) = (value)default_free;
   CAMLreturn(block);
 }
+

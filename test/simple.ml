@@ -75,4 +75,11 @@ let () =
   assert (z = x);
   Offheap.delete y
 
+let () =
+  (* Should handle native ints. *)
+  let x = Nativeint.one in
+  let y = Offheap.copy x in
+  let z = Offheap.get y in
+  assert (z = x);
+  Offheap.delete y
 
