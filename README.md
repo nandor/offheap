@@ -30,6 +30,8 @@ They must be stored in the first two fields of an `Abstract_tag` block. Addition
 
 The object to be copied cannot reference non-Ocaml values (`Custom_tag` or `Abstract_tag`).
 
+The builtin polymorphic comparison and hash functions do not work with off-heap objects anymore since they do not traverse off-heap objects.
+
 ## Acknowledgement
 
 The implementation was inspired by the iterative traversal implemented in the `Obj` module of the OCaml runtime. This library was inspired by the existing `ancient` library, which is unable to handle large objects because of recursive traversals.
