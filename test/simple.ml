@@ -83,3 +83,16 @@ let () =
   assert (z = x);
   Offheap.delete y
 
+let () =
+  (* Should be marked as being part of a value area so compare/hash work. *)
+  let x = Some (
+    "I've got a clan of gingerbread men." ^
+    "Here a man, there a man, lots of gingerbread men." ^
+    "Take a couple if you wish. They're on the dish."
+  ) in
+  let y = Offheap.copy x in
+  let z = Offheap.get y in
+  assert (Pervasives.compare x z = 0);
+  assert (Hashtbl.hash x = Hashtbl.hash z);
+  Offheap.delete y
+

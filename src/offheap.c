@@ -17,6 +17,8 @@
 
 #define ENTRIES_PER_QUEUE_CHUNK 4096
 
+#define Ptr_val(v) ((void *)((v) & ~1))
+#define Val_ptr(v) ((value)(((uintptr_t)(v)) | 1))
 
 
 /**
@@ -61,18 +63,23 @@ typedef struct queue {
 /**
  * Default allocator: invokes malloc.
  */
-static void *default_alloc(value allocator, size_t size)
+void *offheap_alloc(value allocator, size_t size)
 {
-  return malloc(size);
+  void *ptr = malloc(size);
+  caml_page_table_add(In_static_data, ptr, (void *)((uintptr_t)ptr + size));
+  return ptr;
 }
+
 
 /**
  * Default deallocator: invokes free.
  */
-static void default_free(value allocator, void *ptr)
+void offheap_free(value allocator, void *ptr, size_t size)
 {
+  caml_page_table_remove(In_static_data, ptr, (void *)((uintptr_t)ptr + size));
   free(ptr);
 }
+
 
 /**
  * Creates a new queue.
@@ -85,6 +92,7 @@ void queue_init(queue_t *q)
   q->read_pos = 0;
   q->write_pos = 0;
 }
+
 
 /**
  * Adds an item to the end of the queue.
@@ -108,6 +116,7 @@ int queue_push(queue_t *q, value v, header_t hdr)
   return 1;
 }
 
+
 /**
  * Returns the next item from the front of the queue.
  */
@@ -128,6 +137,7 @@ int queue_empty(queue_t *q)
   return q->read_pos == q->write_pos && q->read_chunk == q->write_chunk;
 }
 
+
 /**
  * Resets the front pointer to the start of the queue.
  */
@@ -136,6 +146,7 @@ void queue_reset(queue_t *q)
   q->read_pos = 0;
   q->read_chunk = &q->first_chunk;
 }
+
 
 /**
  * Frees storage used by the queue.
@@ -192,7 +203,7 @@ static inline int can_copy(value val)
 /**
  * Copies an object into a buffer, returning a pointer to the buffer.
  */
-void *offheap_copy(value v, void *data, alloc_t alloc_fn)
+offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
 {
   static struct queue q;
   queue_init(&q);
@@ -204,7 +215,10 @@ void *offheap_copy(value v, void *data, alloc_t alloc_fn)
 
   // Ensure the value can be copied.
   if (!can_copy(v)) {
-    return NULL;
+    offheap_buffer_t result;
+    result.ptr = NULL;
+    result.size = 0;
+    return result;
   }
 
   // Push the first item with offset 0 and marks its header.
@@ -328,8 +342,12 @@ error:
   }
   queue_free(&q);
 
-  return size < 0 ? NULL : (void *)buffer;
+  offheap_buffer_t result;
+  result.ptr = size < 0 ? NULL : (void *)buffer;
+  result.size = size;
+  return result;
 }
+
 
 CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
 {
@@ -338,29 +356,36 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
 
   // If the object is not on the OCaml heap, return it unchanged.
   if (!Is_block(obj) || !Is_in_heap_or_young(obj)) {
-    return obj;
+    CAMLreturn(obj);
   }
 
   // Fetch the allocator function.
   alloc_t alloc_fn = (alloc_t)Field(allocator, 0);
 
   // Copy the object.
-  void *copy = offheap_copy(obj, (void *)allocator, alloc_fn);
-  if (copy == NULL) {
+  offheap_buffer_t buffer = offheap_copy(obj, (void *)allocator, alloc_fn);
+  if (buffer.ptr == NULL) {
     caml_invalid_argument("object could not be copied off-heap");
   }
 
+  // Buffer should be allocated to at least a word boundary.
+  CAMLassert(((uintptr_t)buffer.ptr & 1) == 0);
+
   // Create a proxy pointing to the object, storing the allocator as well.
-  proxy = caml_alloc_small(2, Abstract_tag);
-  Field(proxy, 0) = (value)copy;
-  Field(proxy, 1) = allocator;
+  // The object is traversed by the GC to keep the allocator alive on the heap.
+  // The last bit of the pointer is set to 1 to hide it from GC.
+  proxy = caml_alloc_small(3, 0);
+  Field(proxy, 0) = Val_ptr(buffer.ptr);
+  Field(proxy, 1) = Val_int(buffer.size);
+  Field(proxy, 2) = allocator;
+
   CAMLreturn(proxy);
 }
+
 
 CAMLprim value offheap_get(value obj)
 {
   CAMLparam1(obj);
-  CAMLlocal1(ptr);
 
   // If the object is not on the OCaml heap, return it unchanged.
   if (!Is_block(obj) || !Is_in_heap_or_young(obj)) {
@@ -368,8 +393,8 @@ CAMLprim value offheap_get(value obj)
   }
 
   // Fetch the pointer, which should not have been deleted.
-  ptr = *Op_val(obj);
-  if (Is_long(ptr)) {
+  void *ptr = Ptr_val(Field(obj, 0));
+  if (ptr == NULL) {
     caml_invalid_argument("deleted");
   }
 
@@ -377,32 +402,38 @@ CAMLprim value offheap_get(value obj)
   CAMLreturn(Val_hp(ptr));
 }
 
+
 CAMLprim value offheap_delete(value obj)
 {
   CAMLparam1(obj);
-  CAMLlocal2(allocator, ptr);
+  CAMLlocal1(allocator);
 
   // If object is not on the OCaml heap, do nothing.
   if (!Is_block(obj) || !Is_in_heap_or_young(obj)) {
     CAMLreturn(Val_unit);
   }
 
+  // Read the fields of the object.
+  void *ptr = Ptr_val(Field(obj, 0));
+  size_t size = Int_val(Field(obj, 1));
+  allocator = Field(obj, 2);
+
   // Fetch the pointer, which should not have been deleted.
-  ptr = *Op_val(obj);
-  if (Is_long(ptr)) {
+  if (ptr == NULL) {
     caml_invalid_argument("deleted");
   }
 
   // Free the pointer, which should be a valid malloc'd pointer.
-  allocator = Field(obj, 1);
   free_t free_fn = (free_t)Field(allocator, 1);
-  free_fn((void *)allocator, (void*)ptr);
+  free_fn((void *)allocator, (void*)ptr, size);
 
-  // Clear the field.
+  // Clear the field and size.
   Field(obj, 0) = Val_long(0);
+  Field(obj, 1) = Val_long(0);
 
   CAMLreturn(Val_unit);
 }
+
 
 CAMLprim value offheap_get_alloc(value unit)
 {
@@ -412,8 +443,9 @@ CAMLprim value offheap_get_alloc(value unit)
   // Allocate a block with two fields to hold the default allocator.
   // Custom allocators can store additional data by using a larger object.
   block = caml_alloc_small(2, Abstract_tag);
-  Field(block, 0) = (value)default_alloc;
-  Field(block, 1) = (value)default_free;
+  Field(block, 0) = (value)offheap_alloc;
+  Field(block, 1) = (value)offheap_free;
+
   CAMLreturn(block);
 }
 
