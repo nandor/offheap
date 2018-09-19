@@ -165,7 +165,7 @@ void queue_free(queue_t *q)
 /**
  * Checks if the object can be copied.
  */
-static inline int can_copy(value val)
+static inline int isObjectValid(value val)
 {
   switch (Tag_val(val)) {
     case Abstract_tag: {
@@ -201,9 +201,32 @@ static inline int can_copy(value val)
 
 
 /**
+ * Checks if a value can be copied.
+ */
+static inline int shouldCopy(value v, int copyStatic)
+{
+  if (!Is_block(v)) {
+    return 0;
+  } else {
+    int kind = Classify_addr(v);
+    if ((kind & In_heap) | (kind & In_young)) {
+      return 1;
+    } else if (kind & In_static_data) {
+      return copyStatic;
+    } else {
+      return 0;
+    }
+  }
+}
+
+/**
  * Copies an object into a buffer, returning a pointer to the buffer.
  */
-offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
+offheap_buffer_t offheap_copy(
+    value v,
+    void *data,
+    alloc_t allocFn,
+    int copyStatic)
 {
   static struct queue q;
   queue_init(&q);
@@ -214,7 +237,7 @@ offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
   }
 
   // Ensure the value can be copied.
-  if (!can_copy(v)) {
+  if (!isObjectValid(v)) {
     offheap_buffer_t result;
     result.ptr = NULL;
     result.size = 0;
@@ -251,7 +274,7 @@ offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
         const value field = Field(node, i);
 
         // Skip over primitive fields and non-heap pointers.
-        if (!Is_block(field) || !Is_in_heap_or_young(field)) {
+        if (!shouldCopy(field, copyStatic)) {
           continue;
         }
 
@@ -260,7 +283,7 @@ offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
 
         // Off-heap objects cannot point back to the heap and we cannot copy
         // custom objects as we do not know anything about their internals.
-        if (!can_copy(field)) {
+        if (!isObjectValid(field)) {
           size = -2;
           goto error;
         }
@@ -282,7 +305,7 @@ offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
 
   // Now that the size is known, allocate a contiguous off-heap
   // buffer large enough to hold the entire object.
-  const uintptr_t buffer = (uintptr_t)alloc_fn(data, size);
+  const uintptr_t buffer = (uintptr_t)allocFn(data, size);
 
   // Second pass: Adjust all pointers.
   if (buffer) {
@@ -307,7 +330,7 @@ offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn)
         for (int i = 0; i < sz; ++i) {
           value field = Field(node, i);
 
-          if (!Is_block(field) || !Is_in_heap_or_young(field)) {
+          if (!shouldCopy(field, copyStatic)) {
             // Simply copy over primitives and off-heap pointers.
             Field(dst, i) = field;
           } else {
@@ -360,10 +383,10 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
   }
 
   // Fetch the allocator function.
-  alloc_t alloc_fn = (alloc_t)Field(allocator, 0);
+  alloc_t allocFn = (alloc_t)Field(allocator, 0);
 
   // Copy the object.
-  offheap_buffer_t buffer = offheap_copy(obj, (void *)allocator, alloc_fn);
+  offheap_buffer_t buffer = offheap_copy(obj, (void *)allocator, allocFn, 0);
   if (buffer.ptr == NULL) {
     caml_invalid_argument("object could not be copied off-heap");
   }
@@ -424,8 +447,8 @@ CAMLprim value offheap_delete(value obj)
   }
 
   // Free the pointer, which should be a valid malloc'd pointer.
-  free_t free_fn = (free_t)Field(allocator, 1);
-  free_fn((void *)allocator, (void*)ptr, size);
+  free_t freeFn = (free_t)Field(allocator, 1);
+  freeFn((void *)allocator, (void*)ptr, size);
 
   // Clear the field and size.
   Field(obj, 0) = Val_long(0);

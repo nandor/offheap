@@ -40,4 +40,9 @@ typedef struct {
 /**
  * Copies an object off the heap, into a buffer allocated by an allocator.
  */
-offheap_buffer_t offheap_copy(value v, void *data, alloc_t alloc_fn);
+offheap_buffer_t offheap_copy(
+    value v,
+    void *data,
+    alloc_t allocFn,
+    int copyStatic
+);
